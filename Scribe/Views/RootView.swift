@@ -172,7 +172,7 @@ private struct RecordRow: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.top, 4)
+        .padding(.top, 12)
         .padding(.bottom, 10)
     }
 

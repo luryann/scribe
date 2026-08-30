@@ -3,6 +3,11 @@ import SwiftUI
 struct TodoView: View {
     @Bindable var document: SessionDocument
     @State private var newTask = ""
+    @FocusState private var inputFocused: Bool
+
+    private var trimmedTask: String {
+        newTask.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -39,27 +44,51 @@ struct TodoView: View {
             }
 
             HStack(spacing: 8) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(inputFocused || !trimmedTask.isEmpty ? Color.scribeBlue : Color.inkFaint)
+
                 TextField("Add a task", text: $newTask)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 11.5))
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.ink)
+                    .focused($inputFocused)
                     .onSubmit(add)
-                Button("Add", action: add)
+
+                if !trimmedTask.isEmpty {
+                    Button(action: add) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 18))
+                            .foregroundStyle(Color.scribeBlue)
+                    }
                     .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(newTask.isEmpty ? Color.inkFaint : Color.scribeBlue)
-                    .disabled(newTask.isEmpty)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.wellFill)
-            .overlay(Divider().opacity(0.4), alignment: .top)
+            .padding(.leading, 14)
+            .padding(.trailing, trimmedTask.isEmpty ? 14 : 6)
+            .frame(height: 38)
+            .background(Color.wellFill, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(inputFocused ? Color.scribeBlue.opacity(0.55) : Color.white.opacity(0.6),
+                                  lineWidth: inputFocused ? 1 : 0.5)
+            )
+            .shadow(color: Color.black.opacity(0.05), radius: 3, y: 1)
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+            .padding(.bottom, 14)
+            .animation(.easeOut(duration: 0.14), value: trimmedTask.isEmpty)
+            .animation(.easeOut(duration: 0.14), value: inputFocused)
         }
     }
 
     private var doneCount: Int { document.todos.filter(\.isDone).count }
 
     private func add() {
-        document.addTodo(newTask)
+        let task = trimmedTask
+        guard !task.isEmpty else { return }
+        document.addTodo(task)
         newTask = ""
     }
 }
