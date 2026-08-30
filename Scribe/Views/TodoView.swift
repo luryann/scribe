@@ -3,6 +3,8 @@ import SwiftUI
 struct TodoView: View {
     @Bindable var document: SessionDocument
     @State private var newTask = ""
+    @State private var reminderStatus: String?
+    @State private var exporting = false
     @FocusState private var inputFocused: Bool
 
     private var trimmedTask: String {
@@ -25,11 +27,32 @@ struct TodoView: View {
                         HStack {
                             Text("\(doneCount) of \(document.todos.count) done").foregroundStyle(Color.ink)
                             Spacer()
-                            Text("Auto-extracted").foregroundStyle(Color.inkFaint)
+                            Button(action: exportToReminders) {
+                                HStack(spacing: 3) {
+                                    if exporting {
+                                        ProgressView().controlSize(.mini)
+                                    } else {
+                                        Image(systemName: "square.and.arrow.up")
+                                    }
+                                    Text("Reminders")
+                                }
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Color.scribeBlue)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(exporting || document.todos.allSatisfy(\.isDone))
                         }
                         .font(.system(size: 10.5))
                         .padding(.horizontal, 2)
                         .padding(.bottom, 2)
+
+                        if let reminderStatus {
+                            Text(reminderStatus)
+                                .font(.system(size: 9.5))
+                                .foregroundStyle(Color.inkFaint)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 2)
+                        }
 
                         ForEach($document.todos) { $item in
                             TodoRow(item: $item) {
@@ -84,6 +107,20 @@ struct TodoView: View {
     }
 
     private var doneCount: Int { document.todos.filter(\.isDone).count }
+
+    private func exportToReminders() {
+        exporting = true
+        reminderStatus = nil
+        Task {
+            do {
+                let count = try await RemindersExport.add(document.todos, lecture: document.meta.title)
+                reminderStatus = count == 0 ? "Nothing new to add." : "Added \(count) to Reminders."
+            } catch {
+                reminderStatus = error.localizedDescription
+            }
+            exporting = false
+        }
+    }
 
     private func add() {
         let task = trimmedTask

@@ -11,6 +11,22 @@ final class AppModel {
     private(set) var document: SessionDocument?
     var showingSessions = false
 
+    /// Locales this Mac can transcribe, loaded once on launch for the language picker.
+    private(set) var languages: [Locale] = []
+
+    func loadLanguages() async {
+        languages = await SpeechLanguages.available()
+    }
+
+    /// Microphones available for the input picker; refreshed when the panel is idle.
+    private(set) var inputDevices: [AudioInputDevice] = []
+
+    func refreshInputDevices() {
+        inputDevices = AudioDevices.inputs()
+    }
+
+    func addBookmark() { document?.addBookmark() }
+
     /// Called once the window appears. Reopens the most recent session, or starts a fresh one.
     func bootstrap() {
         guard document == nil, !library.needsFolder else { return }
@@ -35,8 +51,21 @@ final class AppModel {
     }
 
     func delete(_ ref: SessionRef) {
+        if document?.meta.id == ref.meta.id, let doc = document {
+            // Quiesce the on-screen session first — otherwise a pending autosave or a
+            // still-running recording rewrites the folder right after it's trashed.
+            Task { [weak self] in
+                await doc.prepareForDeletion()
+                self?.finishDelete(ref, wasCurrent: true)
+            }
+        } else {
+            finishDelete(ref, wasCurrent: false)
+        }
+    }
+
+    private func finishDelete(_ ref: SessionRef, wasCurrent: Bool) {
         library.deleteSession(ref)
-        guard document?.meta.id == ref.meta.id else { return }
+        guard wasCurrent else { return }
         if let next = library.sessions().first {
             document = SessionDocument(loaded: library.load(next), library: library, intelligence: intelligence)
         } else {
@@ -82,10 +111,15 @@ final class AppModel {
             await document.startRecording()
             let seconds = (args.firstIndex(of: "--autorecord").map { $0 + 1 })
                 .flatMap { $0 < args.count ? Double(args[$0]) : nil } ?? 12
-            try? await Task.sleep(for: .seconds(seconds))
+            dbg("recording on '\(document.transcriber.inputDeviceName)' pref=\(document.transcriber.preferredInputUID ?? "auto")")
+            var peakSeen: Float = 0
+            for _ in 0..<Int(seconds) {
+                try? await Task.sleep(for: .seconds(1))
+                peakSeen = max(peakSeen, document.transcriber.meterLevels.max() ?? 0)
+            }
             await document.stopRecording()
             document.saveNow()
-            dbg("autorecord done: \(document.segments.count) segments, phase=\(document.transcriber.phase)")
+            dbg("autorecord done: \(document.segments.count) segments, elapsed=\(Int(document.elapsed))s peakMeter=\(String(format: "%.3f", peakSeen)) phase=\(document.transcriber.phase)")
         }
 
         if args.contains("--aitest") {

@@ -40,13 +40,14 @@ final class IntelligenceService {
 
     // MARK: Summary
 
-    func summarize(_ transcript: String) async throws -> String {
+    func summarize(_ transcript: String, onProgress: ((Int, Int) -> Void)? = nil) async throws -> String {
         let clean = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return "" }
 
         let chunks = TranscriptChunker.chunks(clean, maxCharacters: contextBudget * 3)
         if chunks.count == 1 {
             let session = LanguageModelSession(instructions: Self.summaryInstructions)
+            session.prewarm()
             return try await session.respond(
                 to: "Summarize this lecture or discussion transcript. Start with a two or three sentence overview, then a \"Key points\" list of 3–6 bullets.\n\nTRANSCRIPT:\n\(clean)"
             ).content
@@ -54,6 +55,8 @@ final class IntelligenceService {
 
         var partials: [String] = []
         for (index, chunk) in chunks.enumerated() {
+            try Task.checkCancellation()
+            onProgress?(index + 1, chunks.count + 1)
             let session = LanguageModelSession(instructions: Self.summaryInstructions)
             let piece = try await session.respond(
                 to: "This is part \(index + 1) of \(chunks.count) of a longer transcript. In 3–5 sentences, capture what matters in this part only.\n\n\(chunk)"
@@ -61,6 +64,8 @@ final class IntelligenceService {
             partials.append(piece)
         }
 
+        try Task.checkCancellation()
+        onProgress?(chunks.count + 1, chunks.count + 1)
         let session = LanguageModelSession(instructions: Self.summaryInstructions)
         return try await session.respond(
             to: "These are notes from consecutive parts of one lecture. Merge them into a single clean summary: a short overview paragraph, then a \"Key points\" list of 3–6 bullets. Remove repetition.\n\n\(partials.joined(separator: "\n\n"))"
@@ -69,11 +74,13 @@ final class IntelligenceService {
 
     // MARK: Flashcards
 
-    func flashcards(from transcript: String) async throws -> [Flashcard] {
-        let source = try await condensedSource(from: transcript)
+    func flashcards(from transcript: String, onProgress: ((Int, Int) -> Void)? = nil) async throws -> [Flashcard] {
+        let source = try await condensedSource(from: transcript, onProgress: onProgress)
         guard !source.isEmpty else { return [] }
 
+        try Task.checkCancellation()
         let session = LanguageModelSession(instructions: Self.flashcardInstructions)
+        session.prewarm()
         let deck = try await session.respond(
             to: "Write study flashcards from this material. Cover the most important ideas, definitions and relationships in the order they appear.\n\n\(source)",
             generating: GeneratedDeck.self
@@ -86,13 +93,15 @@ final class IntelligenceService {
 
     // MARK: To-dos
 
-    func todos(from transcript: String) async throws -> [GeneratedTask] {
+    func todos(from transcript: String, onProgress: ((Int, Int) -> Void)? = nil) async throws -> [GeneratedTask] {
         let clean = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return [] }
 
         let chunks = TranscriptChunker.chunks(clean, maxCharacters: contextBudget * 3)
         var collected: [GeneratedTask] = []
-        for chunk in chunks {
+        for (index, chunk) in chunks.enumerated() {
+            try Task.checkCancellation()
+            onProgress?(index + 1, chunks.count)
             let session = LanguageModelSession(instructions: Self.todoInstructions)
             let list = try await session.respond(
                 to: "Pull out every concrete action a student should take based on what the speaker said: readings, assignments, things to prepare, people to contact, deadlines. Ignore general advice. If nothing qualifies, return an empty list.\n\nTRANSCRIPT:\n\(chunk)",
@@ -132,10 +141,10 @@ final class IntelligenceService {
     // MARK: Helpers
 
     /// For flashcards, work from the transcript directly when it fits, otherwise from a summary of it.
-    private func condensedSource(from transcript: String) async throws -> String {
+    private func condensedSource(from transcript: String, onProgress: ((Int, Int) -> Void)? = nil) async throws -> String {
         let clean = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         if clean.count <= contextBudget * 3 { return clean }
-        return try await summarize(clean)
+        return try await summarize(clean, onProgress: onProgress)
     }
 
     private static let summaryInstructions = Instructions("""
@@ -200,15 +209,63 @@ enum TranscriptChunker {
 
         var result: [String] = []
         var current = ""
+        var currentCount = 0   // track length as an Int; `String.count` in the loop is O(n) each call
         for sentence in sentences {
-            if current.count + sentence.count + 1 > maxCharacters, !current.isEmpty {
+            // ASR output is often unpunctuated, so `.bySentences` can hand back one enormous
+            // "sentence". Break it on word boundaries so no chunk ever exceeds the budget and
+            // overflows the model's context window.
+            guard sentence.count <= maxCharacters else {
+                if !current.isEmpty { result.append(current); current = ""; currentCount = 0 }
+                result.append(contentsOf: hardSplit(sentence, maxCharacters: maxCharacters))
+                continue
+            }
+            let addition = sentence.count + (current.isEmpty ? 0 : 1)
+            if currentCount + addition > maxCharacters, !current.isEmpty {
                 result.append(current)
                 current = ""
+                currentCount = 0
             }
-            current += current.isEmpty ? sentence : " " + sentence
+            if current.isEmpty {
+                current = sentence
+                currentCount = sentence.count
+            } else {
+                current += " " + sentence
+                currentCount += addition
+            }
         }
         if !current.isEmpty { result.append(current) }
         return result
+    }
+
+    /// Splits an over-long run of text on word boundaries (then, only if a single token is
+    /// itself larger than the budget, on character count) so every piece fits `maxCharacters`.
+    private static func hardSplit(_ text: String, maxCharacters: Int) -> [String] {
+        guard maxCharacters > 0 else { return [text] }
+        var pieces: [String] = []
+        var current = ""
+        for word in text.split(separator: " ", omittingEmptySubsequences: true) {
+            if current.isEmpty {
+                current = String(word)
+            } else if current.count + 1 + word.count > maxCharacters {
+                pieces.append(current)
+                current = String(word)
+            } else {
+                current += " " + word
+            }
+        }
+        if !current.isEmpty { pieces.append(current) }
+
+        return pieces.flatMap { piece -> [String] in
+            guard piece.count > maxCharacters else { return [piece] }
+            var chopped: [String] = []
+            var idx = piece.startIndex
+            while idx < piece.endIndex {
+                let end = piece.index(idx, offsetBy: maxCharacters, limitedBy: piece.endIndex) ?? piece.endIndex
+                chopped.append(String(piece[idx..<end]))
+                idx = end
+            }
+            return chopped
+        }
     }
 }
 

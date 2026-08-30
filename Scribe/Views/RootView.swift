@@ -116,6 +116,35 @@ private struct HeaderBar: View {
 
             Spacer(minLength: 0)
 
+            MicMenu(document: document)
+
+            if !app.languages.isEmpty {
+                Menu {
+                    ForEach(app.languages, id: \.identifier) { locale in
+                        Button {
+                            document.locale = locale
+                        } label: {
+                            if locale.identifier == document.locale.identifier {
+                                Label(SpeechLanguages.name(for: locale), systemImage: "checkmark")
+                            } else {
+                                Text(SpeechLanguages.name(for: locale))
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "globe")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.inkFaint)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .disabled(document.isRecording)
+                .help("Transcription language")
+            }
+
             Button {
                 app.showingSessions.toggle()
             } label: {
@@ -137,14 +166,78 @@ private struct HeaderBar: View {
     }
 }
 
+// MARK: - Microphone picker
+
+private struct MicMenu: View {
+    @Bindable var document: SessionDocument
+    @Environment(AppModel.self) private var app
+
+    private var selectedUID: String? { document.transcriber.preferredInputUID }
+
+    var body: some View {
+        Menu {
+            Button {
+                document.transcriber.preferredInputUID = nil
+            } label: {
+                row("Automatic (built-in mic)", selected: selectedUID == nil)
+            }
+
+            if !app.inputDevices.isEmpty {
+                Divider()
+                ForEach(app.inputDevices) { device in
+                    Button {
+                        document.transcriber.preferredInputUID = device.uid
+                    } label: {
+                        row(device.isBluetooth ? "\(device.name) — Bluetooth" : device.name,
+                            selected: selectedUID == device.uid)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: selectedUID == nil ? "mic" : "mic.fill")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.inkFaint)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(document.isRecording)
+        .help("Microphone")
+    }
+
+    @ViewBuilder
+    private func row(_ title: String, selected: Bool) -> some View {
+        if selected {
+            Label(title, systemImage: "checkmark")
+        } else {
+            Text(title)
+        }
+    }
+}
+
 // MARK: - Record row
 
 private struct RecordRow: View {
     @Bindable var document: SessionDocument
+    @Environment(AppModel.self) private var app
+
+    private var micIsDead: Bool {
+        document.transcriber.isRunning && document.transcriber.silenceDuration > 45
+    }
+
+    private var buttonState: RecordButton.Mode {
+        if document.isInterrupted { return .idle }
+        if document.isPaused { return .paused }
+        // `isActive` (not `isRunning`) so the button reads as "stop" while permission is being
+        // requested or the model is downloading — that's exactly what tapping it does.
+        return document.transcriber.isActive ? .recording : .idle
+    }
 
     var body: some View {
         HStack(spacing: 12) {
-            RecordButton(isRecording: document.isRecording) {
+            RecordButton(state: buttonState) {
                 Task { await document.toggleRecording() }
             }
 
@@ -155,66 +248,184 @@ private struct RecordRow: View {
                     .foregroundStyle(document.isRecording ? Color.ink : Color.inkFaint)
 
                 HStack(spacing: 5) {
-                    if document.transcriber.isRunning {
+                    if document.transcriber.isRunning && !micIsDead {
                         Circle().fill(Color.scribeRed).frame(width: 6, height: 6)
                     }
                     Text(statusLine)
                         .font(.system(size: 10.5))
-                        .foregroundStyle(Color.inkSoft.opacity(0.8))
-                        .lineLimit(1)
+                        .foregroundStyle(micIsDead ? Color.scribeRed : Color.inkSoft.opacity(0.8))
+                        .lineLimit(statusIsMessage ? 2 : 1)
+                        .truncationMode(.tail)
+                        .fixedSize(horizontal: false, vertical: statusIsMessage)
                 }
             }
 
-            Spacer(minLength: 4)
+            Spacer(minLength: 8)
 
-            if document.transcriber.isRunning {
-                WaveBars()
-            }
+            controls
         }
         .padding(.horizontal, 16)
         .padding(.top, 12)
         .padding(.bottom, 10)
+        .animation(.easeOut(duration: 0.16), value: document.isPaused)
+        .task(id: document.isRecording) {
+            if !document.isRecording {
+                app.refreshInputDevices()
+                document.transcriber.refreshInputDevice()
+            }
+        }
+    }
+
+    /// Long, wrapping copy (errors, warnings) vs. a short one-line status.
+    private var statusIsMessage: Bool {
+        if micIsDead { return true }
+        switch document.transcriber.phase {
+        case .interrupted, .unavailable: return true
+        default: return false
+        }
+    }
+
+    @ViewBuilder
+    private var controls: some View {
+        if document.isInterrupted {
+            Button("Resume") { Task { await document.resumeRecording() } }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+        } else if document.isPaused {
+            Button {
+                Task { await document.resumeRecording() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "play.fill").font(.system(size: 9, weight: .bold))
+                    Text("Resume").font(.system(size: 11, weight: .semibold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .frame(height: 26)
+                .background(Capsule(style: .continuous).fill(Color.scribeBlue))
+            }
+            .buttonStyle(.plain)
+            .help("Resume recording")
+        } else if document.transcriber.isRunning {
+            HStack(spacing: 10) {
+                LevelMeter(transcriber: document.transcriber)
+                TransportCapsule(
+                    bookmark: { document.addBookmark() },
+                    pause: { document.pauseRecording() }
+                )
+            }
+        }
     }
 
     private var statusLine: String {
+        if micIsDead {
+            return "No sound from \(document.transcriber.inputDeviceName) — check it's not muted."
+        }
+        let language = SpeechLanguages.shortName(for: document.locale)
         switch document.transcriber.phase {
         case .idle:
             return document.hasTranscript
                 ? "Recorded \(RelativeDateTimeFormatter().localizedString(for: document.meta.createdAt, relativeTo: .now))"
-                : "Ready · \(SpeechLanguages.name(for: document.locale))"
-        case .requestingPermission: return "Waiting for permission…"
-        case .preparingModel:       return "Preparing the \(SpeechLanguages.name(for: document.locale)) model…"
-        case .running:              return "Recording · \(SpeechLanguages.name(for: document.locale))"
-        case .unavailable(let why): return why
+                : "Ready · \(language) · \(document.transcriber.inputDeviceName)"
+        case .requestingPermission:
+            return "Waiting for permission…"
+        case .preparingModel(let progress):
+            return progress >= 0
+                ? "Preparing the \(language) model… \(Int(progress * 100))%"
+                : "Preparing the \(language) model…"
+        case .running:
+            return "Recording"
+        case .paused:
+            return "Paused · \(timecode(document.elapsed)) captured"
+        case .interrupted(let why):
+            return why
+        case .unavailable(let why):
+            return why
         }
     }
 }
 
-private struct RecordButton: View {
-    let isRecording: Bool
+/// The two live-recording controls as one glass segment — matched to the panel's `Well`
+/// vocabulary so they read as a deliberate unit, not two loose circles.
+private struct TransportCapsule: View {
+    let bookmark: () -> Void
+    let pause: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            SegmentButton(symbol: "bookmark", help: "Bookmark this moment (⌘B)", action: bookmark)
+            Rectangle()
+                .fill(Color.ink.opacity(0.10))
+                .frame(width: 1, height: 15)
+            SegmentButton(symbol: "pause.fill", help: "Pause recording", action: pause)
+        }
+        .frame(height: 26)
+        .background(Color.wellFill)
+        .clipShape(Capsule(style: .continuous))
+        .overlay(Capsule(style: .continuous).strokeBorder(Color.white.opacity(0.65), lineWidth: 0.5))
+        .shadow(color: Color.black.opacity(0.06), radius: 2.5, y: 1)
+    }
+}
+
+private struct SegmentButton: View {
+    let symbol: String
+    let help: String
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(hovering ? Color.ink : Color.inkSoft)
+                .frame(width: 32, height: 26)
+                .background(hovering ? Color.white.opacity(0.55) : Color.clear)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(help)
+    }
+}
+
+private struct RecordButton: View {
+    enum Mode { case idle, recording, paused }
+
+    let state: Mode
+    let action: () -> Void
+    @State private var hovering = false
+
+    private var fill: Color {
+        switch state {
+        case .idle:      Color.white
+        case .recording: Color.scribeRed
+        case .paused:    Color.scribeRed.opacity(0.4)
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
             ZStack {
                 Circle()
-                    .fill(isRecording ? Color.scribeRed : Color.white)
-                    .overlay(
-                        Circle().strokeBorder(Color.black.opacity(isRecording ? 0 : 0.08), lineWidth: 0.5)
-                    )
-                    .shadow(color: isRecording ? Color.scribeRed.opacity(0.5) : Color.black.opacity(0.18),
-                            radius: isRecording ? 8 : 4, y: isRecording ? 3 : 2)
+                    .fill(fill)
+                    .overlay(Circle().strokeBorder(Color.black.opacity(state == .idle ? 0.08 : 0), lineWidth: 0.5))
+                    .shadow(color: state == .recording ? Color.scribeRed.opacity(0.5) : Color.black.opacity(0.18),
+                            radius: state == .recording ? 8 : 4, y: state == .recording ? 3 : 2)
                     .frame(width: 42, height: 42)
 
-                if isRecording {
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(Color.white)
-                        .frame(width: 14, height: 14)
-                } else {
+                switch state {
+                case .idle:
                     Image(systemName: "mic.fill")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(Color.ink)
+                case .recording:
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(Color.white)
+                        .frame(width: 14, height: 14)
+                case .paused:
+                    Image(systemName: "pause.fill")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Color.white)
                 }
             }
             .scaleEffect(hovering ? 1.05 : 1)
@@ -222,31 +433,34 @@ private struct RecordButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .accessibilityLabel(isRecording ? "Stop recording" : "Start recording")
+        .accessibilityLabel(state == .idle ? "Start recording" : "Stop recording")
     }
 }
 
-private struct WaveBars: View {
-    @State private var animating = false
-    private let heights: [CGFloat] = [0.4, 0.8, 0.55, 1.0, 0.35, 0.7, 0.5]
+/// A live rolling meter: each bar is one recent ~33 ms peak reading from the mic, newest on
+/// the right. Height and redness both track the actual sound, so silence sits nearly flat and
+/// faint (backing up the dead-mic warning) and speech ripples through it in real time.
+private struct LevelMeter: View {
+    let transcriber: Transcriber
 
     var body: some View {
-        HStack(alignment: .center, spacing: 2.5) {
-            ForEach(heights.indices, id: \.self) { index in
+        let levels = transcriber.meterLevels
+        HStack(alignment: .center, spacing: 1.5) {
+            ForEach(levels.indices, id: \.self) { index in
+                let shaped = Self.shape(levels[index])
                 Capsule()
-                    .fill(Color.inkSoft.opacity(0.5))
-                    .frame(width: 2.5, height: 26 * heights[index])
-                    .scaleEffect(y: animating ? 1 : 0.4, anchor: .center)
-                    .animation(
-                        .easeInOut(duration: 0.5 + heights[index] * 0.3)
-                            .repeatForever(autoreverses: true)
-                            .delay(Double(index) * 0.08),
-                        value: animating
-                    )
+                    .fill(Color.scribeRed.opacity(0.22 + 0.65 * Double(shaped)))
+                    .frame(width: 2, height: max(2.5, CGFloat(shaped) * 22))
             }
         }
-        .frame(height: 26)
-        .onAppear { animating = true }
+        .frame(height: 22)
+        .animation(.linear(duration: 0.045), value: levels)
+        .accessibilityHidden(true)
+    }
+
+    /// Perceptual curve — boosts quiet speech so the meter clearly reacts without clipping.
+    private static func shape(_ value: Float) -> Float {
+        min(1, pow(max(0, value), 0.45) * 1.3)
     }
 }
 
@@ -258,6 +472,22 @@ private struct FooterBar: View {
 
     var body: some View {
         VStack(spacing: 6) {
+            if let trouble = app.library.saveTrouble {
+                Text(trouble)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.scribeRed)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+
+            ForEach(document.warnings, id: \.self) { warning in
+                Text(warning)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.orange)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+
             if let error = document.aiError {
                 Text(error)
                     .font(.system(size: 10))
@@ -272,13 +502,31 @@ private struct FooterBar: View {
                     .multilineTextAlignment(.center)
             }
 
-            FooterActionButton(
-                title: config.title,
-                systemImage: config.symbol,
-                isBusy: document.runningJob == config.job,
-                isEnabled: isEnabled,
-                action: config.run
-            )
+            if document.isRunningJob {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(busyLabel)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.inkSoft)
+                    Spacer(minLength: 0)
+                    Button("Cancel") { document.cancelJob() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color.scribeBlue)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 34)
+                .padding(.horizontal, 12)
+                .background(Color.scribeBlue.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            } else {
+                FooterActionButton(
+                    title: config.title,
+                    systemImage: config.symbol,
+                    isBusy: false,
+                    isEnabled: isEnabled,
+                    action: config.run
+                )
+            }
         }
         .padding(.horizontal, 14)
         .padding(.top, 8)
@@ -287,6 +535,21 @@ private struct FooterBar: View {
     }
 
     private var needsAI: Bool { config.job != nil }
+
+    private var busyLabel: String {
+        let base: String
+        switch document.runningJob {
+        case .summary: base = "Summarizing"
+        case .cards:   base = "Writing cards"
+        case .todos:   base = "Finding to-dos"
+        case .notes:   base = "Polishing notes"
+        default:       base = "Working"
+        }
+        if let progress = document.jobProgress {
+            return "\(base)… \(progress.step)/\(progress.total)"
+        }
+        return "\(base)…"
+    }
 
     private var isEnabled: Bool {
         guard let job = config.job else { return true }

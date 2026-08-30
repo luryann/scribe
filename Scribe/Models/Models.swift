@@ -9,6 +9,13 @@ struct TranscriptSegment: Identifiable, Codable, Hashable {
     var start: TimeInterval
 }
 
+/// A moment the user flagged while recording, for jumping back to later.
+struct Bookmark: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var time: TimeInterval
+    var label: String = ""
+}
+
 struct Flashcard: Identifiable, Codable, Hashable {
     var id = UUID()
     var front: String
@@ -111,42 +118,45 @@ extension JSONDecoder {
 // MARK: - Transcript presentation
 
 /// A run of transcript shown together under one timestamp marker.
-struct TranscriptParagraph: Identifiable {
+struct TranscriptParagraph: Identifiable, Hashable {
     let id: UUID          // id of the first segment, so views can scroll to it
     let start: TimeInterval
     let marker: String
-    let text: String
+    var text: String
+    var segmentCount: Int = 1
 }
 
 enum TranscriptLayout {
-    /// Groups segments into readable paragraphs, starting a new one whenever there's
-    /// a >= 18s gap since the last marker (or every ~6 segments).
-    static func paragraphs(from segments: [TranscriptSegment]) -> [TranscriptParagraph] {
-        var result: [TranscriptParagraph] = []
-        var bucket: [TranscriptSegment] = []
-        var markerTime: TimeInterval = -.greatestFiniteMagnitude
+    /// Cut-off for a paragraph: at most ~18s of speech or ~6 segments.
+    private static let maxSpan: TimeInterval = 18
+    private static let maxSegments = 6
 
-        func flush() {
-            guard let first = bucket.first else { return }
-            result.append(
+    /// Folds one finalized segment into a running paragraph list — O(1) per segment, so it
+    /// can be called on every result over a multi-hour recording without rebuilding the world.
+    static func append(_ segment: TranscriptSegment, to paragraphs: inout [TranscriptParagraph]) {
+        if var last = paragraphs.last,
+           segment.start - last.start < maxSpan,
+           last.segmentCount < maxSegments {
+            last.text += " " + segment.text
+            last.segmentCount += 1
+            paragraphs[paragraphs.count - 1] = last
+        } else {
+            paragraphs.append(
                 TranscriptParagraph(
-                    id: first.id,
-                    start: first.start,
-                    marker: timecode(first.start),
-                    text: bucket.map(\.text).joined(separator: " ")
+                    id: segment.id,
+                    start: segment.start,
+                    marker: timecode(segment.start),
+                    text: segment.text
                 )
             )
-            bucket.removeAll(keepingCapacity: true)
         }
+    }
 
-        for segment in segments {
-            if !bucket.isEmpty, segment.start - markerTime >= 18 || bucket.count >= 6 {
-                flush()
-            }
-            if bucket.isEmpty { markerTime = segment.start }
-            bucket.append(segment)
-        }
-        flush()
+    /// Groups segments into readable paragraphs (used for a full rebuild on load / export).
+    static func paragraphs(from segments: [TranscriptSegment]) -> [TranscriptParagraph] {
+        var result: [TranscriptParagraph] = []
+        result.reserveCapacity(segments.count / 4 + 1)
+        for segment in segments { append(segment, to: &result) }
         return result
     }
 
