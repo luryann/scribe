@@ -182,6 +182,9 @@ final class Transcriber {
         guard generation == sessionGeneration else { return }
 
         // Fresh engine, then point it at the chosen mic *before* anything reads its format.
+        #if DEBUG
+        AudioDevices.debugDump()
+        #endif
         engine = AVAudioEngine()
         applyInputDevice()
 
@@ -521,7 +524,7 @@ final class Transcriber {
             let count = byteCount / MemoryLayout<Int32>.size
             let samples = raw.assumingMemoryBound(to: Int32.self)
             var i = 0
-            while i < count { peak = max(peak, abs(Float(samples[i])) / 2_147_483_647); i += 3 }
+            while i < count { peak = max(peak, abs(Float(samples[i])) / 0x1p31); i += 3 }
         default:
             return
         }
@@ -539,10 +542,20 @@ final class Transcriber {
         meterTask?.cancel()
         meterTask = Task { [weak self] in
             var display: Float = 0
+            #if DEBUG
+            var ticks = 0
+            #endif
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(33))   // ~30 fps
                 guard let self else { return }
                 let peak = min(1, Float(bitPattern: self.clock.level.exchange(0, ordering: .relaxed)))
+
+                #if DEBUG
+                ticks += 1
+                if ticks % 60 == 0 {   // ~every 2s
+                    print("[Scribe] heartbeat phase=\(self.phase) engineRunning=\(self.engine.isRunning) tapInstalled=\(self.tapInstalled) frames=\(self.clock.frames.load(ordering: .relaxed)) peak=\(peak) recovering=\(self.recovering) configRebuilds=\(self.configRebuilds)")
+                }
+                #endif
 
                 // Instant attack, smooth release so the bars glide between tap callbacks
                 // instead of strobing to zero.

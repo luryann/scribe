@@ -33,6 +33,9 @@ final class SessionDocument {
 
     var runningJob: AIJob?
     var aiError: String?
+    /// Neutral "that worked, there was just nothing to produce" note — e.g. a lecture with no
+    /// action items. Shown in the footer, distinct from `aiError`. Cleared when a job starts.
+    var aiNote: String?
     /// `(step, total)` while a multi-pass AI job runs over a long transcript.
     var jobProgress: (step: Int, total: Int)?
 
@@ -114,6 +117,16 @@ final class SessionDocument {
     }
 
     var hasTranscript: Bool { !segments.isEmpty }
+
+    /// Nothing has been recorded, generated, or hand-entered — the session is an untouched
+    /// blank. Used to avoid stacking up empty "New Session"s: one such session can be reused
+    /// or silently discarded without losing anything.
+    var isBlank: Bool {
+        !isRecording
+            && segments.isEmpty && volatile.isEmpty
+            && summary.isEmpty && notes.isEmpty
+            && flashcards.isEmpty && todos.isEmpty && bookmarks.isEmpty
+    }
 
     // MARK: Recording
 
@@ -226,17 +239,25 @@ final class SessionDocument {
     func generateFlashcards() async {
         await runJob(.cards) {
             self.flashcards = try await self.intelligence.flashcards(from: self.fullTranscript, onProgress: self.report)
+            if self.flashcards.isEmpty {
+                self.aiNote = "There wasn't enough distinct material here to make cards from."
+            }
         }
     }
 
     func generateTodos() async {
         await runJob(.todos) {
             let generated = try await self.intelligence.todos(from: self.fullTranscript, onProgress: self.report)
+            if generated.isEmpty {
+                self.aiNote = "No action items in this lecture — nothing to add for now."
+            }
             self.todos = generated.map { task in
-                TodoItem(
+                let due = task.due?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let quote = task.source.trimmingCharacters(in: .whitespacesAndNewlines)
+                return TodoItem(
                     text: task.task,
-                    dueHint: task.due.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : task.due,
-                    sourceQuote: task.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : task.source,
+                    dueHint: (due?.isEmpty ?? true) ? nil : due,
+                    sourceQuote: quote.isEmpty ? nil : quote,
                     sourceTime: TranscriptMatcher.time(for: task.source, in: self.segments)
                 )
             }
@@ -267,6 +288,7 @@ final class SessionDocument {
         runningJob = job
         jobProgress = nil
         aiError = nil
+        aiNote = nil
         let task = Task { [weak self] in
             guard let self else { return }
             do {
@@ -291,10 +313,16 @@ final class SessionDocument {
     }
 
     private static func aiMessage(for error: any Error) -> String {
+        if let known = error as? IntelligenceError {
+            return known.localizedDescription
+        }
+        if let gemini = error as? GeminiError {
+            return gemini.localizedDescription
+        }
         if let generation = error as? LanguageModelSession.GenerationError {
             switch generation {
             case .exceededContextWindowSize:
-                return "This lecture is very long — try Summarize first, then generate from the summary."
+                return "There's too much text here for the on-device model to work through, even in pieces. Try a shorter recording."
             case .guardrailViolation, .refusal:
                 return "Apple's model declined this transcript. Try again, or edit the text first."
             case .rateLimited, .concurrentRequests:

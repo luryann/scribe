@@ -33,6 +33,7 @@ enum AudioDevices {
 
         return ids.compactMap { id -> AudioInputDevice? in
             guard inputChannelCount(id) > 0 else { return nil }
+            guard !isJunkDevice(id) else { return nil }
             let transport = transportType(id)
             return AudioInputDevice(
                 id: id,
@@ -48,6 +49,23 @@ enum AudioDevices {
     static func device(uid: String) -> AudioInputDevice? {
         inputs().first { $0.uid == uid }
     }
+
+    #if DEBUG
+    /// One-shot enumeration dump for diagnosing device-selection failures.
+    static func debugDump() {
+        let fourCC: (UInt32) -> String = { v in
+            let bytes = [UInt8(v >> 24 & 0xFF), UInt8(v >> 16 & 0xFF), UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF)]
+            let s = String(bytes: bytes, encoding: .ascii) ?? ""
+            return s.allSatisfy { $0.isLetter || $0.isNumber || $0 == " " } ? "'\(s)'" : "\(v)"
+        }
+        print("[Scribe] --- audio input enumeration ---")
+        print("[Scribe] systemDefaultInputID = \(systemDefaultInputID.map(String.init) ?? "nil")")
+        for d in inputs() {
+            print("[Scribe]   id=\(d.id) uid=\(d.uid) name=\(d.name) transport=\(fourCC(transportType(d.id))) builtIn=\(d.isBuiltIn) bt=\(d.isBluetooth) ch=\(inputChannelCount(d.id))")
+        }
+        print("[Scribe] --- end enumeration ---")
+    }
+    #endif
 
     /// The device Scribe records from when the user hasn't chosen one: built-in mic first,
     /// then any wired device, and Bluetooth only as a last resort.
@@ -76,7 +94,52 @@ enum AudioDevices {
         return deviceID
     }
 
+    // MARK: Filtering
+
+    /// True for devices that shouldn't appear in a human mic picker: CoreAudio marks some as
+    /// hidden, and it spins up a *private aggregate* ("CADefaultDeviceAggregate-<pid>-<n>")
+    /// whenever a process records from the default device — that internal plumbing was leaking
+    /// into the list as a garbage entry. Real aggregates (Loopback, BlackHole, user-built
+    /// multi-output) are not private and stay visible.
+    private static func isJunkDevice(_ id: AudioDeviceID) -> Bool {
+        if uint32Property(id, kAudioDevicePropertyIsHidden, scope: kAudioObjectPropertyScopeGlobal) != 0 {
+            return true
+        }
+        if transportType(id) == kAudioDeviceTransportTypeAggregate {
+            if isPrivateAggregate(id) { return true }
+            let uid = stringProperty(id, kAudioDevicePropertyDeviceUID) ?? ""
+            if uid.hasPrefix("CADefaultDeviceAggregate") { return true }
+        }
+        return false
+    }
+
+    private static func isPrivateAggregate(_ id: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioAggregateDevicePropertyComposition,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: Unmanaged<CFDictionary>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFDictionary>?>.size)
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value) == noErr,
+              let dict = value?.takeRetainedValue() as? [String: Any]
+        else { return false }
+        return (dict[kAudioAggregateDeviceIsPrivateKey as String] as? Bool) == true
+            || (dict[kAudioAggregateDeviceIsPrivateKey as String] as? Int) == 1
+    }
+
     // MARK: Property helpers
+
+    private static func uint32Property(_ id: AudioDeviceID, _ selector: AudioObjectPropertySelector,
+                                       scope: AudioObjectPropertyScope) -> UInt32 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain
+        )
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        _ = AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value)
+        return value
+    }
 
     private static func inputChannelCount(_ id: AudioDeviceID) -> Int {
         var address = AudioObjectPropertyAddress(

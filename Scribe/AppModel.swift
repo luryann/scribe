@@ -10,6 +10,8 @@ final class AppModel {
 
     private(set) var document: SessionDocument?
     var showingSessions = false
+    /// The hidden provider-settings panel — opened by Option-clicking the Sessions button.
+    var showingSettings = false
 
     /// Locales this Mac can transcribe, loaded once on launch for the language picker.
     private(set) var languages: [Locale] = []
@@ -27,14 +29,18 @@ final class AppModel {
 
     func addBookmark() { document?.addBookmark() }
 
-    /// Called once the window appears. Reopens the most recent session, or starts a fresh one.
+    /// Called once the window appears. Always lands on a clean session to record into — the
+    /// most recent transcript is one tap away in the Sessions list — but reuses a still-blank
+    /// most-recent session instead of leaving another empty one behind.
     func bootstrap() {
         guard document == nil, !library.needsFolder else { return }
-        if let recent = library.sessions().first {
-            document = SessionDocument(loaded: library.load(recent), library: library, intelligence: intelligence)
-        } else {
-            document = freshDocument()
-        }
+        document = launchSession()
+    }
+
+    private func launchSession() -> SessionDocument {
+        guard let recent = library.sessions().first else { return freshDocument() }
+        let mostRecent = SessionDocument(loaded: library.load(recent), library: library, intelligence: intelligence)
+        return mostRecent.isBlank ? mostRecent : freshDocument()
     }
 
     func newSession() {
@@ -43,10 +49,13 @@ final class AppModel {
             guard !library.needsFolder else { return }
         }
         Task { [weak self] in
-            if let current = self?.document, current.isRecording {
-                await current.stopRecording()
+            guard let self else { return }
+            if let current = self.document {
+                // Already sitting on an untouched blank session — nothing to create.
+                if current.isBlank { return }
+                if current.isRecording { await current.stopRecording() }
             }
-            self?.document = self?.freshDocument()
+            self.document = self.freshDocument()
         }
     }
 
@@ -104,6 +113,11 @@ final class AppModel {
         if library.needsFolder { library.useContainerFolderForTesting() }
 
         bootstrap()
+        // `bootstrap()` now opens a fresh blank session; `--aitest` needs a real transcript,
+        // so reopen the most recent saved session for that run.
+        if args.contains("--aitest"), document?.isBlank == true, let recent = library.sessions().first {
+            document = SessionDocument(loaded: library.load(recent), library: library, intelligence: intelligence)
+        }
         try? await Task.sleep(for: .seconds(1))
         guard let document else { dbg("no document (needsFolder=\(library.needsFolder))"); return }
 

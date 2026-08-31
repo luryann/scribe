@@ -3,14 +3,22 @@ import SwiftUI
 struct LiveView: View {
     @Bindable var document: SessionDocument
     @State private var flash: TranscriptParagraph.ID?
+    /// Whether new transcript should pull the view down to the live edge. Only a *user* drag
+    /// flips this off; programmatic scrolls never touch it.
     @State private var following = true
+    /// Set while the user is physically dragging the scroller, so we can tell their scroll
+    /// from the ones we perform ourselves when new text lands.
+    @State private var userDragging = false
+    /// Last seen vertical scroll offset — used to catch an upward scroll on input paths that
+    /// don't report a scroll phase (e.g. a discrete mouse wheel).
+    @State private var lastOffset: CGFloat = 0
 
     var body: some View {
         if document.paragraphs.isEmpty && document.volatile.isEmpty && !document.transcriber.isRunning {
             EmptyHint(
                 symbol: "waveform",
                 title: "Ready when you are",
-                message: "Press record to start a live transcript. Everything is transcribed on-device and saved as you go."
+                message: "Press record to start a live transcript."
             )
         } else {
             ScrollViewReader { proxy in
@@ -25,15 +33,35 @@ struct LiveView: View {
                             .id(paragraph.id)
                         }
 
-                        VolatileLine(document: document)
-                            .id(volatileAnchor)
+                        VolatileLine(document: document) {
+                            // The in-progress phrase grows a few times a second; keep the
+                            // view pinned to it as it extends. Fired from inside VolatileLine
+                            // so the parent (and its paragraph ForEach) don't re-evaluate on
+                            // every volatile tick. No animation — at this cadence it stutters.
+                            guard following else { return }
+                            scrollToEnd(proxy)
+                        }
+                        .id(volatileAnchor)
                     }
                     .padding(16)
                 }
-                .onScrollGeometryChange(for: Bool.self) { geo in
-                    geo.contentOffset.y >= geo.contentSize.height - geo.containerSize.height - 32
-                } action: { _, nearBottom in
-                    following = nearBottom
+                // Re-evaluate `following` only when a user drag comes to rest — content
+                // appended to the list grows `contentSize` without moving `contentOffset`,
+                // which would otherwise read as "scrolled up" and wrongly stop following.
+                .onScrollPhaseChange { _, phase, context in
+                    if phase == .interacting || phase == .tracking { userDragging = true }
+                    guard phase == .idle, userDragging else { return }
+                    userDragging = false
+                    let geo = context.geometry
+                    following = geo.contentOffset.y
+                        >= geo.contentSize.height - geo.containerSize.height - 40
+                }
+                // Insurance for input paths that don't emit a scroll phase (discrete mouse
+                // wheel): an offset that *decreased* is unambiguously a scroll up — appended
+                // content can only grow contentSize, never move the offset back.
+                .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { _, y in
+                    if y < lastOffset - 4 { following = false }
+                    lastOffset = y
                 }
                 .overlay(alignment: .bottom) {
                     if !following && document.transcriber.isRunning {
@@ -55,12 +83,16 @@ struct LiveView: View {
                     }
                 }
                 .animation(.easeOut(duration: 0.15), value: following)
-                .onChange(of: document.paragraphs.count) {
+                // Finalized transcript: a new segment either starts a paragraph or extends
+                // the last one, so key off `segments.count`, not `paragraphs.count` (which
+                // doesn't change when the tail paragraph merely grows).
+                .onChange(of: document.segments.count) {
                     guard following else { return }
                     withAnimation(.easeOut(duration: 0.2)) { scrollToEnd(proxy) }
                 }
-                .onChange(of: document.volatile.isEmpty) {
-                    guard following else { return }
+                .onChange(of: document.transcriber.isRunning) { _, running in
+                    guard running else { return }
+                    following = true
                     Task { @MainActor in scrollToEnd(proxy) }
                 }
                 .onChange(of: document.scrollTarget) { _, _ in handleScrollTarget(proxy) }
@@ -138,16 +170,21 @@ private struct ParagraphRow: View {
 /// not the whole transcript list.
 private struct VolatileLine: View {
     @Bindable var document: SessionDocument
+    /// Called whenever the volatile text changes, so the transcript can follow it down.
+    var onGrow: () -> Void = {}
 
     var body: some View {
-        if document.volatile.isEmpty {
-            Color.clear.frame(height: 1)
-        } else {
-            Text(document.volatile)
-                .font(.reading(13))
-                .italic()
-                .foregroundStyle(Color.inkFaint)
-                .padding(.horizontal, 6)
+        Group {
+            if document.volatile.isEmpty {
+                Color.clear.frame(height: 1)
+            } else {
+                Text(document.volatile)
+                    .font(.reading(13))
+                    .italic()
+                    .foregroundStyle(Color.inkFaint)
+                    .padding(.horizontal, 6)
+            }
         }
+        .onChange(of: document.volatile) { onGrow() }
     }
 }

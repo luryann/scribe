@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct RootView: View {
@@ -99,6 +100,9 @@ private struct HeaderBar: View {
     @Bindable var document: SessionDocument
     @Environment(AppModel.self) private var app
     @FocusState private var titleFocused: Bool
+    /// Tracked live so the Sessions button's Option-click branch doesn't depend on
+    /// `NSEvent.modifierFlags` still being set by the time the action closure runs.
+    @State private var optionDown = false
 
     var body: some View {
         @Bindable var app = app
@@ -146,7 +150,19 @@ private struct HeaderBar: View {
             }
 
             Button {
-                app.showingSessions.toggle()
+                // Hidden entry point: Option-click opens the provider-settings panel instead
+                // of the session list. Plain click is unchanged. One popover anchor can only
+                // host one presentation, so the two flags are mutually exclusive and the
+                // content is switched below.
+                let wantSettings = optionDown || NSEvent.modifierFlags.contains(.option)
+                let alreadyOpen = app.showingSessions || app.showingSettings
+                if alreadyOpen {
+                    app.showingSessions = false
+                    app.showingSettings = false
+                } else {
+                    app.showingSettings = wantSettings
+                    app.showingSessions = !wantSettings
+                }
             } label: {
                 Image(systemName: "list.bullet")
                     .font(.system(size: 13, weight: .medium))
@@ -155,10 +171,21 @@ private struct HeaderBar: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .popover(isPresented: $app.showingSessions, arrowEdge: .bottom) {
-                SessionsPopover()
+            .popover(
+                isPresented: Binding(
+                    get: { app.showingSessions || app.showingSettings },
+                    set: { if !$0 { app.showingSessions = false; app.showingSettings = false } }
+                ),
+                arrowEdge: .bottom
+            ) {
+                if app.showingSettings {
+                    SettingsPopover()
+                } else {
+                    SessionsPopover()
+                }
             }
         }
+        .onModifierKeysChanged(mask: .option) { _, new in optionDown = new.contains(.option) }
         .padding(.horizontal, 12)
         .padding(.top, 10)
         .padding(.bottom, 2)
@@ -492,6 +519,12 @@ private struct FooterBar: View {
                 Text(error)
                     .font(.system(size: 10))
                     .foregroundStyle(Color.scribeRed)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            } else if let note = document.aiNote {
+                Text(note)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.inkFaint)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
             } else if !app.intelligence.isAvailable, let reason = app.intelligence.unavailableReason, needsAI {

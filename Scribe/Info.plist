@@ -32,6 +32,15 @@
 	<string>Scribe uses on-device speech recognition to turn what it hears into text.</string>
 	<key>NSRemindersFullAccessUsageDescription</key>
 	<string>Scribe adds the action items it finds in a lecture to your Reminders when you ask it to.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>Scribe adds the action items it finds in a lecture to your Reminders when you ask it to.</string>
+	<!-- EventKit routes Reminders access through CalendarAgent; without the calendars
+	     sandbox entitlement the request fails with "Mach error 4099 / Sandbox restriction".
+	     Scribe never touches the calendar, but the connection needs these present. -->
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Scribe uses the system Reminders service, which is provided by Calendar. Scribe does not read or change your calendar.</string>
+	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+	<string>Scribe uses the system Reminders service, which is provided by Calendar. Scribe does not read or change your calendar.</string>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
 	<key>ITSAppUsesNonExemptEncryption</key>

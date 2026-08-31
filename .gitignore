@@ -9,6 +9,9 @@ xcuserdata/
 # macOS
 .DS_Store
 
+# Local Claude Code guidance — never commit
+CLAUDE.md
+
 # Swift Package Manager
 .build/
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata

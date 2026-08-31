@@ -28,23 +28,26 @@ struct SessionsPopover: View {
 
             Divider()
 
-            if refs.isEmpty {
-                Text("No saved sessions yet.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 16)
-            } else {
-                ScrollView {
-                    VStack(spacing: 4) {
-                        ForEach(refs) { ref in
-                            row(ref)
+            Group {
+                if refs.isEmpty {
+                    Text("No saved sessions yet.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                        .padding(.horizontal, 14)
+                } else {
+                    ScrollView {
+                        VStack(spacing: 4) {
+                            ForEach(refs) { ref in
+                                row(ref)
+                            }
                         }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .top)
                     }
-                    .padding(8)
                 }
-                .frame(maxHeight: 460)
             }
+            .frame(height: 380)
         }
         .frame(width: 268)
         .onAppear { refs = app.library.sessions() }
